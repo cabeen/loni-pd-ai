@@ -163,50 +163,58 @@ class SemanticScholarClient:
         result = self._sch.get_paper(paper_id, fields=S2_FIELDS)
         return _s2_to_paper(result)
 
-    def get_paper_citations(self, paper_id: str, max_results: int = 500) -> list[Paper]:
-        """Fetch papers that cite the given paper (forward citations)."""
-        self._limiter.acquire()
+    def _fetch_citation_list(self, fetch_fn, paper_id: str, max_results: int, attr: str,
+                              discovery_method: DiscoveryMethod) -> list[Paper]:
+        """Shared retry + error handling for citations/references/recommendations."""
         raw_id = paper_id.removeprefix("s2:")
-        try:
-            results = self._sch.get_paper_citations(
-                raw_id, fields=S2_CITATION_FIELDS, limit=min(max_results, 1000)
-            )
-        except TypeError:
-            # The S2 library crashes on null pagination data for some papers
-            logger.warning("S2 returned no citation data for %s", paper_id)
+        results = None
+
+        # Retry transient errors (504s, network issues) up to 3 times
+        for attempt in range(3):
+            self._limiter.acquire()
+            try:
+                results = fetch_fn(raw_id, fields=S2_CITATION_FIELDS,
+                                   limit=min(max_results, 500))
+                break
+            except TypeError:
+                # S2 library bug: null pagination data for some papers
+                logger.warning("S2 returned no data for %s (attempt %d)", paper_id, attempt + 1)
+                return []
+            except Exception as e:
+                if attempt < 2:
+                    import time
+                    wait = 2 ** (attempt + 1)
+                    logger.info("S2 request failed for %s, retrying in %ds: %s", paper_id, wait, e)
+                    time.sleep(wait)
+                else:
+                    raise
+
+        if results is None:
             return []
 
         papers: list[Paper] = []
         for item in results:
             if len(papers) >= max_results:
                 break
-            citing = getattr(item, "citingPaper", item)
-            paper = _s2_to_paper(citing, DiscoveryMethod.CITATION_FORWARD, paper_id)
+            inner = getattr(item, attr, item)
+            paper = _s2_to_paper(inner, discovery_method, paper_id)
             if paper:
                 papers.append(paper)
         return papers
+
+    def get_paper_citations(self, paper_id: str, max_results: int = 500) -> list[Paper]:
+        """Fetch papers that cite the given paper (forward citations)."""
+        return self._fetch_citation_list(
+            self._sch.get_paper_citations, paper_id, max_results,
+            "citingPaper", DiscoveryMethod.CITATION_FORWARD,
+        )
 
     def get_paper_references(self, paper_id: str, max_results: int = 500) -> list[Paper]:
         """Fetch papers referenced by the given paper (backward references)."""
-        self._limiter.acquire()
-        raw_id = paper_id.removeprefix("s2:")
-        try:
-            results = self._sch.get_paper_references(
-                raw_id, fields=S2_CITATION_FIELDS, limit=min(max_results, 1000)
-            )
-        except TypeError:
-            logger.warning("S2 returned no reference data for %s", paper_id)
-            return []
-
-        papers: list[Paper] = []
-        for item in results:
-            if len(papers) >= max_results:
-                break
-            cited = getattr(item, "citedPaper", item)
-            paper = _s2_to_paper(cited, DiscoveryMethod.CITATION_BACKWARD, paper_id)
-            if paper:
-                papers.append(paper)
-        return papers
+        return self._fetch_citation_list(
+            self._sch.get_paper_references, paper_id, max_results,
+            "citedPaper", DiscoveryMethod.CITATION_BACKWARD,
+        )
 
     def get_recommendations(self, paper_ids: list[str], max_results: int = 100) -> list[Paper]:
         """Get algorithmic recommendations based on a set of positive-example papers."""

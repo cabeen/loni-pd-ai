@@ -183,14 +183,21 @@ class OpenAlexClient:
         reraise=True,
     )
     def get_cited_by(self, work_id: str, max_results: int = 500) -> list[Paper]:
-        """Get works that cite the given work."""
+        """Get works that cite the given work (forward citations).
+
+        *work_id* can be an OpenAlex ID (W...), a DOI, or a prefixed paper_id.
+        """
         from pyalex import Works
 
+        oalex_id = self._resolve_to_openalex_id(work_id)
+        if not oalex_id:
+            return []
+
         self._limiter.acquire()
-        oalex_id = work_id.removeprefix("oalex:")
+        logger.info("OpenAlex get_cited_by: %s (resolved=%s) max=%d", work_id, oalex_id, max_results)
 
         papers: list[Paper] = []
-        for page in Works().filter(cites=oalex_id).paginate(per_page=200):
+        for page in Works().filter(cites=oalex_id).paginate(per_page=min(max_results, 200)):
             for work in page:
                 if len(papers) >= max_results:
                     break
@@ -199,4 +206,91 @@ class OpenAlexClient:
                     papers.append(paper)
             if len(papers) >= max_results:
                 break
+
+        logger.info("OpenAlex get_cited_by returned %d papers", len(papers))
         return papers
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=30),
+        retry=retry_if_exception_type(Exception),
+        reraise=True,
+    )
+    def get_references(self, work_id: str, max_results: int = 500) -> list[Paper]:
+        """Get works referenced by the given work (backward references).
+
+        Uses the referenced_works field on the work object to batch-fetch details.
+        """
+        from pyalex import Works
+
+        oalex_id = self._resolve_to_openalex_id(work_id)
+        if not oalex_id:
+            return []
+
+        self._limiter.acquire()
+        logger.info("OpenAlex get_references: %s (resolved=%s) max=%d", work_id, oalex_id, max_results)
+
+        try:
+            work = Works()[oalex_id]
+        except Exception:
+            logger.exception("Failed to fetch work for references: %s", work_id)
+            return []
+
+        ref_ids = work.get("referenced_works", [])
+        if not ref_ids:
+            logger.info("OpenAlex: no referenced_works for %s", work_id)
+            return []
+
+        # Trim to max_results before fetching details
+        ref_ids = ref_ids[:max_results]
+
+        # Batch fetch via filter (OpenAlex supports openalex_id filter with | OR)
+        papers: list[Paper] = []
+        # Process in chunks of 50 (API limit on OR filters)
+        for i in range(0, len(ref_ids), 50):
+            chunk = ref_ids[i:i + 50]
+            self._limiter.acquire()
+            id_filter = "|".join(chunk)
+            try:
+                for page in Works().filter(openalex_id=id_filter).paginate(per_page=200):
+                    for w in page:
+                        paper = _openalex_to_paper(w, DiscoveryMethod.CITATION_BACKWARD, work_id)
+                        if paper:
+                            papers.append(paper)
+            except Exception:
+                logger.exception("Failed to fetch reference batch for %s", work_id)
+
+        logger.info("OpenAlex get_references returned %d papers", len(papers))
+        return papers
+
+    def _resolve_to_openalex_id(self, paper_id: str) -> str | None:
+        """Resolve any identifier to a raw OpenAlex ID (W...).
+
+        The `cites` filter requires a raw OpenAlex ID, not a DOI URL.
+        """
+        from pyalex import Works
+
+        # Already a raw OpenAlex ID
+        if paper_id.startswith("oalex:"):
+            return paper_id.removeprefix("oalex:")
+        if paper_id.startswith("W") and paper_id[1:].isdigit():
+            return paper_id
+
+        # DOI — look up via Works[] to get the OpenAlex ID
+        if paper_id.startswith("10."):
+            doi_url = f"doi:https://doi.org/{paper_id}"
+        elif paper_id.startswith("s2:") or paper_id.startswith("pmid:"):
+            logger.warning("Cannot resolve %s to OpenAlex ID without a DOI", paper_id)
+            return None
+        else:
+            doi_url = paper_id
+
+        self._limiter.acquire()
+        try:
+            work = Works()[doi_url]
+            oalex_id = work.get("id", "")
+            # Extract W... from full URL like https://openalex.org/W1234567
+            return oalex_id.split("/")[-1] if "/" in oalex_id else oalex_id
+        except Exception:
+            logger.warning("Could not resolve %s to OpenAlex ID", paper_id)
+            return None

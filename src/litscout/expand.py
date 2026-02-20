@@ -62,12 +62,20 @@ def run_expand(
 ) -> tuple[list[Paper], dict[str, Any]]:
     """Run citation expansion from seed papers.
 
+    Uses OpenAlex for citation graph (forward/backward) and Semantic Scholar
+    for algorithmic recommendations.
+
     Returns (new_papers_added, summary_dict).
     """
+    from litscout.api_clients.openalex import OpenAlexClient
     from litscout.api_clients.semantic_scholar import SemanticScholarClient
 
     papers_path = config.project_dir / "papers.jsonl"
-    client = SemanticScholarClient(api_key=config.apis.semantic_scholar_api_key)
+    oalex = OpenAlexClient(
+        email=config.apis.unpaywall_email,
+        api_key=config.apis.openalex_api_key,
+    )
+    s2_client = SemanticScholarClient(api_key=config.apis.semantic_scholar_api_key)
 
     # Load seeds
     all_papers = load_papers(papers_path)
@@ -95,34 +103,40 @@ def run_expand(
         candidate_connections: dict[str, int] = {}  # paper_id -> count
         candidate_map: dict[str, Paper] = {}
 
+        # Cap per-seed fetch so we don't make huge requests per paper
+        per_seed_limit = min(max_candidates, 100)
+
         for seed in current_seeds:
-            raw_id = seed.paper_id
+            # Use DOI for OpenAlex lookups (most seeds come from S2 with DOIs)
+            lookup_id = seed.doi if seed.doi else seed.paper_id
 
             discovered: list[Paper] = []
 
             if strategy in ("forward", "both", "all"):
                 try:
-                    fwd = client.get_paper_citations(raw_id, max_results=max_candidates)
+                    fwd = oalex.get_cited_by(lookup_id, max_results=per_seed_limit)
                     discovered.extend(fwd)
+                    logger.info("Forward citations for %s: %d found", lookup_id, len(fwd))
                 except Exception:
-                    logger.exception("Forward citations failed for %s", raw_id)
+                    logger.exception("Forward citations failed for %s", lookup_id)
 
             if strategy in ("backward", "both", "all"):
                 try:
-                    bwd = client.get_paper_references(raw_id, max_results=max_candidates)
+                    bwd = oalex.get_references(lookup_id, max_results=per_seed_limit)
                     discovered.extend(bwd)
+                    logger.info("Backward references for %s: %d found", lookup_id, len(bwd))
                 except Exception:
-                    logger.exception("Backward references failed for %s", raw_id)
+                    logger.exception("Backward references failed for %s", lookup_id)
 
             if strategy in ("recommend", "all"):
                 try:
-                    recs = client.get_recommendations([raw_id], max_results=max_candidates)
+                    recs = s2_client.get_recommendations([seed.paper_id], max_results=per_seed_limit)
                     discovered.extend(recs)
                 except Exception:
-                    logger.exception("Recommendations failed for %s", raw_id)
+                    logger.exception("Recommendations failed for %s", seed.paper_id)
 
             for paper in discovered:
-                paper.seed_paper_id = raw_id
+                paper.seed_paper_id = seed.paper_id
                 pid = paper.paper_id
                 candidate_connections[pid] = candidate_connections.get(pid, 0) + 1
                 if pid not in candidate_map:
