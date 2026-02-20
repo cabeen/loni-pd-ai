@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+*.whl
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project data (user-generated, not committed)
+papers.jsonl
+searches/
+expansions/
+retrieval_log.jsonl
+fulltext/
+manual_retrieval_list.md
+reports/
+litscout.toml
+
+# Secrets
+.env
