@@ -59,6 +59,7 @@ def run_expand(
     depth: int = 1,
     min_citation_count: int = 0,
     max_candidates: int = 500,
+    tags: list[str] | None = None,
 ) -> tuple[list[Paper], dict[str, Any]]:
     """Run citation expansion from seed papers.
 
@@ -178,6 +179,13 @@ def run_expand(
 
         scored.sort(key=lambda x: x[0], reverse=True)
         top_candidates = [p for _, p in scored[:max_candidates]]
+
+        # Apply tags to candidates
+        if tags:
+            for paper in top_candidates:
+                for t in tags:
+                    if t not in paper.tags:
+                        paper.tags.append(t)
 
         # Append to papers.jsonl
         new_count = append_papers(top_candidates, papers_path)

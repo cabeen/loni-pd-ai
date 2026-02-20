@@ -50,7 +50,7 @@ def cli(ctx: click.Context, verbose: bool, project_dir: Path) -> None:
 @click.option("--year-range", nargs=2, type=int, default=None, help="Start and end year.")
 @click.option("--min-citations", type=int, default=0, help="Minimum citation count.")
 @click.option("--max-results", type=int, default=100, help="Max results per source.")
-@click.option("--tag", default=None, help="Tag to apply to discovered papers.")
+@click.option("--tag", multiple=True, help="Tags to apply to discovered papers (repeatable).")
 @click.pass_context
 def search(
     ctx: click.Context,
@@ -59,7 +59,7 @@ def search(
     year_range: tuple[int, int] | None,
     min_citations: int,
     max_results: int,
-    tag: str | None,
+    tag: tuple[str, ...],
 ) -> None:
     """Search for papers by keyword query."""
     from litscout.config import load_config
@@ -78,7 +78,7 @@ def search(
         year_range=year_range,
         min_citation_count=min_citations,
         max_results=max_results,
-        tag=tag,
+        tags=list(tag),
     )
 
     click.echo(f"\nResults: {log.total_results} total, {log.new_papers_added} new, "
@@ -98,6 +98,7 @@ def search(
 @click.option("--depth", type=int, default=1, help="Expansion depth.")
 @click.option("--min-citations", type=int, default=0, help="Minimum citations for candidates.")
 @click.option("--max-candidates", type=int, default=500, help="Max candidates to add.")
+@click.option("--tag", multiple=True, help="Tags to apply to expanded papers (repeatable).")
 @click.pass_context
 def expand(
     ctx: click.Context,
@@ -107,6 +108,7 @@ def expand(
     depth: int,
     min_citations: int,
     max_candidates: int,
+    tag: tuple[str, ...],
 ) -> None:
     """Expand corpus via citation graph from seed papers."""
     from litscout.config import load_config
@@ -126,10 +128,65 @@ def expand(
         depth=depth,
         min_citation_count=min_citations,
         max_candidates=max_candidates,
+        tags=list(tag),
     )
 
     click.echo(f"\nExpansion complete: {summary['candidates_found']} candidates found, "
                f"{summary['new_papers_added']} new papers added")
+
+
+# ---------- rank ----------
+
+
+@cli.command()
+@click.option("--top", type=int, default=20, help="Number of top papers to show/tag.")
+@click.option("--tag", "apply_tag", default=None, help="Tag to apply to the top N papers.")
+@click.option("--filter-tag", default=None, help="Only rank papers with this tag.")
+@click.option("--filter-method", default=None, help="Only rank papers with this discovery method.")
+@click.option("--relevance-prompt", default=None, help="LLM relevance prompt (requires ANTHROPIC_API_KEY).")
+@click.option("--relevance-weight", type=float, default=0.5,
+              help="Weight of LLM score vs bibliometric score (0.0-1.0).")
+@click.pass_context
+def rank(
+    ctx: click.Context,
+    top: int,
+    apply_tag: str | None,
+    filter_tag: str | None,
+    filter_method: str | None,
+    relevance_prompt: str | None,
+    relevance_weight: float,
+) -> None:
+    """Rank papers by importance and optionally tag the top N."""
+    from litscout.config import load_config
+    from litscout.rank import run_rank
+
+    config = load_config(ctx.obj["project_dir"])
+
+    scored = run_rank(
+        config,
+        top=top,
+        tag=apply_tag,
+        filter_tag=filter_tag,
+        filter_method=filter_method,
+        relevance_prompt=relevance_prompt,
+        relevance_weight=relevance_weight,
+    )
+
+    if not scored:
+        click.echo("No papers to rank.")
+        return
+
+    click.echo(f"\nTop {len(scored)} papers" +
+               (f" (tagged {apply_tag!r})" if apply_tag else "") + ":")
+    click.echo("")
+    for i, (score, paper) in enumerate(scored, 1):
+        citations = paper.citation_count or 0
+        year = paper.year or "n.d."
+        tags = ", ".join(paper.tags) if paper.tags else ""
+        title = paper.title[:65]
+        click.echo(f"  {i:3d}. [{score:.2f}] [{citations:>5d} cit] ({year}) {title}")
+        if tags:
+            click.echo(f"       tags: {tags}")
 
 
 # ---------- retrieve ----------

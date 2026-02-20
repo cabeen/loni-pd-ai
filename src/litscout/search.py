@@ -88,7 +88,7 @@ def run_search(
     fields_of_study: list[str] | None = None,
     min_citation_count: int = 0,
     max_results: int = 100,
-    tag: str | None = None,
+    tags: list[str] | None = None,
 ) -> tuple[list[Paper], SearchLog]:
     """Execute a keyword search across the requested sources, dedup, and return results.
 
@@ -131,8 +131,8 @@ def run_search(
     unique_papers: list[Paper] = []
     for paper in all_papers:
         if not dedup.is_duplicate(paper):
-            if tag:
-                paper.tags.append(tag)
+            if tags:
+                paper.tags.extend(tags)
             dedup.add(paper)
             unique_papers.append(paper)
 
