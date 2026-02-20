@@ -36,3 +36,6 @@ litscout.toml
 
 # Secrets
 .env
+
+# Workspace
+local

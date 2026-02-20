@@ -33,6 +33,9 @@ S2_FIELDS = [
     "publicationTypes",
 ]
 
+# Citations/references endpoints don't support tldr
+S2_CITATION_FIELDS = [f for f in S2_FIELDS if f != "tldr"]
+
 
 def _s2_to_paper(
     raw: Any,
@@ -160,17 +163,18 @@ class SemanticScholarClient:
         result = self._sch.get_paper(paper_id, fields=S2_FIELDS)
         return _s2_to_paper(result)
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=30),
-        retry=retry_if_exception_type(Exception),
-        reraise=True,
-    )
     def get_paper_citations(self, paper_id: str, max_results: int = 500) -> list[Paper]:
         """Fetch papers that cite the given paper (forward citations)."""
         self._limiter.acquire()
         raw_id = paper_id.removeprefix("s2:")
-        results = self._sch.get_paper_citations(raw_id, fields=S2_FIELDS, limit=min(max_results, 1000))
+        try:
+            results = self._sch.get_paper_citations(
+                raw_id, fields=S2_CITATION_FIELDS, limit=min(max_results, 1000)
+            )
+        except TypeError:
+            # The S2 library crashes on null pagination data for some papers
+            logger.warning("S2 returned no citation data for %s", paper_id)
+            return []
 
         papers: list[Paper] = []
         for item in results:
@@ -182,17 +186,17 @@ class SemanticScholarClient:
                 papers.append(paper)
         return papers
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=30),
-        retry=retry_if_exception_type(Exception),
-        reraise=True,
-    )
     def get_paper_references(self, paper_id: str, max_results: int = 500) -> list[Paper]:
         """Fetch papers referenced by the given paper (backward references)."""
         self._limiter.acquire()
         raw_id = paper_id.removeprefix("s2:")
-        results = self._sch.get_paper_references(raw_id, fields=S2_FIELDS, limit=min(max_results, 1000))
+        try:
+            results = self._sch.get_paper_references(
+                raw_id, fields=S2_CITATION_FIELDS, limit=min(max_results, 1000)
+            )
+        except TypeError:
+            logger.warning("S2 returned no reference data for %s", paper_id)
+            return []
 
         papers: list[Paper] = []
         for item in results:
@@ -204,17 +208,15 @@ class SemanticScholarClient:
                 papers.append(paper)
         return papers
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=30),
-        retry=retry_if_exception_type(Exception),
-        reraise=True,
-    )
     def get_recommendations(self, paper_ids: list[str], max_results: int = 100) -> list[Paper]:
         """Get algorithmic recommendations based on a set of positive-example papers."""
         self._limiter.acquire()
         raw_ids = [pid.removeprefix("s2:") for pid in paper_ids]
-        results = self._sch.get_recommended_papers(raw_ids[0], limit=min(max_results, 500))
+        try:
+            results = self._sch.get_recommended_papers(raw_ids[0], limit=min(max_results, 500))
+        except TypeError:
+            logger.warning("S2 returned no recommendation data for %s", paper_ids)
+            return []
 
         papers: list[Paper] = []
         for item in results:
